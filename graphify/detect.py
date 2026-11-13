@@ -48,8 +48,8 @@ _MTIME_SUBSECOND_S = 0.05
 CODE_EXTENSIONS = {'.py', '.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.ejs', '.ets', '.go', '.rs', '.vb', '.cbl', '.cob', '.cobol', '.cpy', '.java', '.groovy', '.gradle', '.cpp', '.cc', '.cxx', '.c', '.h', '.hpp', '.cu', '.cuh', '.metal', '.rb', '.rake', '.swift', '.kt', '.kts', '.cs', '.scala', '.php', '.lua', '.luau', '.toc', '.zig', '.ps1', '.psm1', '.psd1', '.ex', '.exs', '.m', '.mm', '.ml', '.mli', '.jl', '.vue', '.svelte', '.astro', '.dart', '.v', '.sv', '.svh', '.vh', '.sql', '.r', '.f', '.F', '.f90', '.F90', '.f95', '.F95', '.f03', '.F03', '.f08', '.F08', '.pas', '.pp', '.dpr', '.dpk', '.lpr', '.inc', '.dfm', '.lfm', '.lpk', '.sh', '.bash', '.json', '.yaml', '.yml', '.tf', '.tfvars', '.hcl', '.dm', '.dme', '.dmi', '.dmm', '.dmf', '.sln', '.slnx', '.csproj', '.fsproj', '.vbproj', '.xaml', '.razor', '.cshtml', '.cls', '.trigger', '.lisp', '.cl', '.lsp', '.asd', '.robot', '.resource', '.sol', '.erl', '.hrl', '.escript'}
 DOC_EXTENSIONS = {'.md', '.mdx', '.qmd', '.skill', '.txt', '.rst', '.html', '.j2', '.jinja', '.jinja2'}
 PAPER_EXTENSIONS = {'.pdf'}
-IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'}
-OFFICE_EXTENSIONS = {'.docx', '.xlsx'}
+IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.heic', '.heif'}
+OFFICE_EXTENSIONS = {'.docx', '.xlsx', '.pptx'}
 VIDEO_EXTENSIONS = {'.mp4', '.mov', '.webm', '.mkv', '.avi', '.m4v', '.mp3', '.wav', '.m4a', '.ogg'}
 _BINARY_MEDIA_EXTENSIONS = (IMAGE_EXTENSIONS - {'.svg'}) | VIDEO_EXTENSIONS
 
@@ -871,8 +871,107 @@ def xlsx_extract_structure(path: Path) -> dict:
     return {"nodes": nodes, "edges": edges}
 
 
+def _pptx_shape_lines(shape, depth: int = 0) -> list[str]:
+    """Text lines for one slide shape, descending into groups (bounded depth)."""
+    lines: list[str] = []
+    if depth > 8:
+        return lines
+    sub = getattr(shape, "shapes", None)
+    if sub is not None and getattr(shape, "shape_type", None) == 6:  # MSO_SHAPE_TYPE.GROUP
+        for child in sub:
+            lines.extend(_pptx_shape_lines(child, depth + 1))
+        return lines
+    if getattr(shape, "has_table", False):
+        rows = [
+            [" ".join(cell.text.split()).replace("|", "\\|") for cell in row.cells]
+            for row in shape.table.rows
+        ]
+        if rows:
+            lines.append("| " + " | ".join(rows[0]) + " |")
+            lines.append("| " + " | ".join("---" for _ in rows[0]) + " |")
+            lines.extend("| " + " | ".join(r) + " |" for r in rows[1:])
+        return lines
+    if getattr(shape, "has_text_frame", False):
+        for para in shape.text_frame.paragraphs:
+            text = " ".join("".join(run.text for run in para.runs).split())
+            if text:
+                lines.append(("  " * para.level) + "- " + text if para.level else text)
+    return lines
+
+
+def pptx_to_markdown(path: Path) -> str:
+    """Convert a .pptx deck to markdown: one ``## Slide N`` section per slide.
+
+    Slide titles, body text, tables and speaker notes are kept, so a node's
+    citation can point at the slide it came from.
+    """
+    if not _zip_within_caps(path):
+        return ""
+    try:
+        from pptx import Presentation
+        prs = Presentation(str(path))
+        out: list[str] = []
+        for idx, slide in enumerate(prs.slides, 1):
+            title_shape = slide.shapes.title
+            title = " ".join(title_shape.text.split()) if title_shape is not None and title_shape.has_text_frame else ""
+            out.append(f"## Slide {idx}" + (f": {title}" if title else ""))
+            for shape in slide.shapes:
+                if title_shape is not None and shape.shape_id == title_shape.shape_id:
+                    continue
+                out.extend(_pptx_shape_lines(shape))
+            if slide.has_notes_slide:
+                notes = slide.notes_slide.notes_text_frame
+                note_text = " ".join(notes.text.split()) if notes is not None else ""
+                if note_text:
+                    out.append(f"> Speaker notes: {note_text}")
+            out.append("")
+        return "\n".join(out)
+    except ImportError:
+        return ""
+    except Exception:
+        return ""
+
+
+# macOS st_flags bit for an iCloud Drive "Optimize Mac Storage" placeholder whose
+# content lives only in the cloud. Reading such a file silently downloads it, so
+# the scan leaves it out unless GRAPHIFY_DOWNLOAD_ICLOUD=1 opts in.
+SF_DATALESS = 0x40000000
+
+
+def is_icloud_placeholder(path: Path) -> bool:
+    """True when ``path`` is a not-yet-downloaded iCloud placeholder (macOS only)."""
+    try:
+        return bool(getattr(os.stat(_os_path(path)), "st_flags", 0) & SF_DATALESS)
+    except OSError:
+        return False
+
+
+def _icloud_download_allowed() -> bool:
+    return os.environ.get("GRAPHIFY_DOWNLOAD_ICLOUD", "").strip().lower() in ("1", "true", "yes")
+
+
+def office_sidecar_name(path: Path, root: Path) -> str:
+    """File name of the markdown sidecar ``convert_office_file`` writes for ``path``.
+
+    Public so callers (graphify fs) can map a sidecar's ``source_file`` back to
+    the original Office file without re-deriving the hashing rules.
+    """
+    import hashlib
+    import unicodedata
+    try:
+        key = path.resolve().relative_to(Path(root).resolve()).as_posix()
+    except (ValueError, OSError):
+        # Not under the scan root (custom GRAPHIFY_OUT layouts, --include
+        # sources, direct API callers): keep the previous absolute form rather
+        # than guessing, so behavior is unchanged for those cases.
+        key = str(path.resolve())
+    normalized_path = unicodedata.normalize("NFC", key)
+    name_hash = hashlib.sha256(normalized_path.encode()).hexdigest()[:8]
+    return f"{path.stem}_{name_hash}.md"
+
+
 def convert_office_file(path: Path, out_dir: Path, root: "Path | None" = None) -> Path | None:
-    """Convert a .docx or .xlsx to a markdown sidecar in out_dir.
+    """Convert a .docx, .xlsx or .pptx to a markdown sidecar in out_dir.
 
     Returns the path of the converted .md file, or None if conversion failed
     or the required library is not installed.
@@ -882,6 +981,8 @@ def convert_office_file(path: Path, out_dir: Path, root: "Path | None" = None) -
         text = docx_to_markdown(path)
     elif ext == ".xlsx":
         text = xlsx_to_markdown(path)
+    elif ext == ".pptx":
+        text = pptx_to_markdown(path)
     else:
         return None
 
@@ -901,21 +1002,10 @@ def convert_office_file(path: Path, out_dir: Path, root: "Path | None" = None) -
     # Path objects are NFC, so the same source file would otherwise hash to
     # different sidecar names across runs — making --update treat every Office
     # file as new and re-extract it (#1226).
-    import hashlib
-    import unicodedata
     if root is None:
         # Default layout: out_dir is <root>/<graphify-out>/converted.
         root = out_dir.parent.parent
-    try:
-        key = path.resolve().relative_to(Path(root).resolve()).as_posix()
-    except (ValueError, OSError):
-        # Not under the scan root (custom GRAPHIFY_OUT layouts, --include
-        # sources, direct API callers): keep the previous absolute form rather
-        # than guessing, so behavior is unchanged for those cases.
-        key = str(path.resolve())
-    normalized_path = unicodedata.normalize("NFC", key)
-    name_hash = hashlib.sha256(normalized_path.encode()).hexdigest()[:8]
-    out_path = out_dir / f"{path.stem}_{name_hash}.md"
+    out_path = out_dir / office_sidecar_name(path, root)
     # Skip re-writing only when the sidecar is present AND at least as new as the
     # source. detect_incremental tracks the SIDECAR (not the Office source), so a
     # sidecar that is never rewritten after the source changes leaves the doc
@@ -947,6 +1037,8 @@ def count_words(path: Path) -> int:
             return len(docx_to_markdown(path).split())
         if ext == ".xlsx":
             return len(xlsx_to_markdown(path).split())
+        if ext == ".pptx":
+            return len(pptx_to_markdown(path).split())
         # Only regular files may be opened. A repository can contain named
         # pipes, sockets and device nodes, and `clone <github-url>` exists to
         # point the scan at trees the operator did not write. open() on a FIFO
@@ -2314,6 +2406,11 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
 
     out_base = Path(cache_root).resolve() if cache_root is not None else root
     converted_dir = out_base / GRAPHIFY_OUT / "converted"
+    if cache_root is not None:
+        # Sidecars written outside the scan root (`extract --out`) are still
+        # corpus input; let the semantic pass's root guard accept them.
+        from graphify.paths import register_sidecar_root
+        register_sidecar_root(converted_dir)
 
     for p in all_files:
         # For memory dir files, skip hidden/noise filtering
@@ -2342,6 +2439,11 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
             continue
         if _is_sensitive(p):
             skipped_sensitive.append(str(p))
+            continue
+        if not in_memory and is_icloud_placeholder(p) and not _icloud_download_allowed():
+            # Reading an iCloud placeholder downloads it; keep it out of the content
+            # pass (graphify fs still records its name, folder and tags).
+            skipped_sensitive.append(str(p) + " [iCloud placeholder not downloaded - set GRAPHIFY_DOWNLOAD_ICLOUD=1]")
             continue
         ftype = classify_file(p)
         if not ftype:

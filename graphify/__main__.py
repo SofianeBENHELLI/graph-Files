@@ -975,6 +975,10 @@ def _run_cli() -> None:
         print("    --max-children N        cap children per node (default 200)")
         print("    --top-k-edges N         per-symbol outbound edges in inspector (default 12)")
         print("    --label NAME            project label in header")
+        print("  fs index <folder>       knowledge graph of a folder of files (folders, Finder tags, topics; local LLM)")
+        print("  fs explore [folder]     explorer web app with a local LLM that navigates the graph")
+        print("  fs app install [folder] macOS launcher app; --login keeps the index updated in the background")
+        print("  fs mcp [folder]         MCP server over the fs graph   (graphify fs --help for all fs commands)")
         print("  extract <path>          headless full extraction (AST + semantic LLM) for CI/scripts")
         print("    --backend B             gemini|kimi|claude|openai|deepseek|ollama (default: whichever API key is set)")
         print("                            openai also reaches self-hosted OpenAI-compatible servers (llama.cpp,")
@@ -1101,6 +1105,11 @@ def _run_cli() -> None:
         return
 
     cmd = sys.argv[1]
+
+    # graphify fs has its own argparse help, so route it before the help guard.
+    if cmd == "fs":
+        from graphify.fs.cli import main as fs_main
+        sys.exit(fs_main(sys.argv[2:]))
 
     # Universal help guard: -h/--help/-? anywhere after the command shows help
     # and stops — prevents flags from silently triggering destructive subcommands

@@ -129,6 +129,28 @@ What you get out of the box:
 
 ---
 
+## Use it as a file explorer: `graphify fs`
+
+Turn a folder of everyday files (Word, PowerPoint, Excel, PDF, images, iPhone photos, audio, video) into a knowledge graph of **folders, files, tags and topics**, then browse it in a local web app where a **small local LLM navigates the graph for you**. Everything runs on your machine with [Ollama](https://ollama.com).
+
+```bash
+uv tool install --python 3.12 ".[fs,video]"  # from this repository
+graphify fs setup                            # pull the local models (Ollama must be running)
+graphify fs index ~/Documents/Work           # folders + Finder tags + keywords + content + topics
+graphify fs open ~/Documents/Work            # web app with search, graph, previews and local chat
+graphify fs app install ~/Documents/Work --login   # "Graph Files" app; keeps the index updated at login
+claude mcp add graphify-fs -- graphify fs mcp ~/Documents/Work   # same tools for Claude
+```
+
+- Reads your **Finder tags** (with colours) and **Office/PDF keywords**. The local model suggests topic tags, and tags you accept are written back to Finder (with undo).
+- Tags are linked by co-occurrence, files are linked to the concepts inside them, and topics are named by the local model.
+- **Follows your changes.** The explorer watches the folder: new, moved and deleted files show up within seconds, and the local model reads new contents in the background once the folder is calm.
+- **iCloud-only files** are listed but never downloaded. The index lives in `~/.graphify-fs/`, never inside your folder.
+
+Full guide: [docs/fs-explorer.md](docs/fs-explorer.md).
+
+---
+
 ## Benchmarks: 0.497 recall@10, 0 LLM credits
 
 | Benchmark | Metric | graphify | Field |

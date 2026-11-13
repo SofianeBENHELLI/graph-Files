@@ -456,6 +456,26 @@ def disambiguate_ambiguous_candidates(
 GRAPHIFY_OUT_NAME = os.path.basename(os.path.normpath(GRAPHIFY_OUT))
 
 
+# Directories graphify itself writes converted sidecars to (Office -> markdown).
+# With `extract --out DIR` they live outside the corpus root, yet they are corpus
+# input produced by this process, so the corpus-root guard must accept them.
+# Only directories registered by detect() are trusted; nothing else is loosened.
+_SIDECAR_ROOTS: set[Path] = set()
+
+
+def register_sidecar_root(path: "str | Path") -> None:
+    """Trust ``path`` (a graphify-written ``converted/`` dir) as corpus input."""
+    try:
+        _SIDECAR_ROOTS.add(Path(path).resolve())
+    except (OSError, RuntimeError):
+        pass
+
+
+def in_sidecar_root(resolved: Path) -> bool:
+    """True when an already-resolved path lies inside a registered sidecar dir."""
+    return any(resolved.is_relative_to(base) for base in _SIDECAR_ROOTS)
+
+
 def out_path(*parts: str) -> Path:
     """A path inside the configured output dir, e.g. ``out_path("cache")``.
 
