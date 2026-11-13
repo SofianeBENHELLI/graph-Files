@@ -25,8 +25,12 @@ def media_key(rel: str, size: int, mtime: float) -> str:
 
 
 def process_media(scan: ScanResult, media_dir: Path, *, extract_model: str, whisper_model: str,
-                  extract: bool = True, progress=None) -> tuple[dict, dict[str, str]]:
+                  extract: bool = True, transcribe_new: bool = True,
+                  progress=None) -> tuple[dict, dict[str, str]]:
     """Transcribe + extract every online media file.
+
+    ``transcribe_new=False`` only reuses transcripts made by earlier runs (a fast
+    refresh must not start Whisper on a new hour-long video).
 
     Returns ``(extraction, source_map)`` where extraction is ``{nodes, edges}``
     and source_map maps each transcript's ``source_file`` spelling to the media
@@ -36,6 +40,9 @@ def process_media(scan: ScanResult, media_dir: Path, *, extract_model: str, whis
     nodes: list[dict] = []
     edges: list[dict] = []
     source_map: dict[str, str] = {}
+    if not transcribe_new:
+        media = [r for r in media if (media_dir / media_key(r.rel, r.size, r.mtime)
+                                      / (Path(r.rel).stem + ".txt")).exists()]
     if not media:
         return {"nodes": nodes, "edges": edges}, source_map
     try:
@@ -44,7 +51,8 @@ def process_media(scan: ScanResult, media_dir: Path, *, extract_model: str, whis
         print(f"[graphify fs] media skipped: {exc}", file=sys.stderr)
         return {"nodes": nodes, "edges": edges}, source_map
     try:
-        tr._get_whisper()
+        if transcribe_new:  # loading Whisper is only needed for new transcripts
+            tr._get_whisper()
     except ImportError as exc:
         print(f"[graphify fs] {len(media)} media file(s) skipped: {exc}", file=sys.stderr)
         return {"nodes": nodes, "edges": edges}, source_map

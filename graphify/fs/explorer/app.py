@@ -8,6 +8,9 @@ Security model (it serves your files):
 - the Host header must be the local address (blocks DNS-rebinding);
 - raw files, thumbnails and open/reveal actions are limited to files that are in
   the index, under the indexed root.
+
+``serve`` also watches the folder (``watch.Updater``) so the index follows your
+changes, and records its address for ``graphify fs open`` (``launcher.py``).
 """
 from __future__ import annotations
 
@@ -32,6 +35,7 @@ from starlette.staticfiles import StaticFiles
 from graphify.fs.finder import FinderTagWriter, finder_tags_supported
 from graphify.fs.tags import TagDecisions
 from graphify.fs.tools import FsIndex, ToolError
+from graphify.fs.watch import Updater
 
 STATIC = Path(__file__).parent / "static"
 COOKIE = "gfs_token"
@@ -41,15 +45,17 @@ TEXT_PREVIEW_MAX = 2 * 1024 * 1024
 
 class ExplorerState:
     def __init__(self, index: FsIndex, token: str, *, port: int, finder_write: bool = True,
-                 chat_model: str | None = None, extra_hosts: set[str] | None = None):
+                 chat_model: str | None = None, extra_hosts: set[str] | None = None,
+                 updater: Updater | None = None):
         self.index = index
         self.token = token
         self.port = port
         self.allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"} | set(extra_hosts or ())
         self.finder_write = finder_write and finder_tags_supported()
         self.chat_model = chat_model or index.state.chat_model
-        self.refresh_lock = threading.Lock()
-        self.refresh_status: dict = {"running": False, "last": None, "log": []}
+        # Runs every refresh of this index; watches the folder when serve() asks it to.
+        self.updater = updater or Updater(index.root, index.index_dir, watch=False, content=False,
+                                          on_update=index.maybe_reload)
         self.writer = FinderTagWriter(index.root, index.paths.tag_writes)
 
     # -- path safety ------------------------------------------------------
@@ -74,10 +80,11 @@ def _err(msg: str, status: int = 400) -> JSONResponse:
 
 def create_app(index: FsIndex, *, token: str | None = None, port: int = 8765,
                finder_write: bool = True, chat_model: str | None = None,
-               extra_hosts: set[str] | None = None) -> Starlette:
+               extra_hosts: set[str] | None = None, updater: Updater | None = None) -> Starlette:
     """Build the ASGI app. ``extra_hosts`` is for tests (e.g. Starlette's "testserver")."""
     st = ExplorerState(index, token or secrets.token_urlsafe(24), port=port,
-                       finder_write=finder_write, chat_model=chat_model, extra_hosts=extra_hosts)
+                       finder_write=finder_write, chat_model=chat_model, extra_hosts=extra_hosts,
+                       updater=updater)
 
     def q(request: Request, name: str, default=None):
         value = request.query_params.get(name)
@@ -272,33 +279,18 @@ def create_app(index: FsIndex, *, token: str | None = None, port: int = 8765,
         done = await run_in_threadpool(st.writer.undo, 1)
         return _json({"undone": done})
 
-    # -- refresh (fast, metadata-only rebuild) ------------------------------
+    # -- refresh: quick (names, tags, full text) or with contents -------------
     async def api_refresh(request: Request):
-        if st.refresh_status["running"]:
-            return _json(st.refresh_status)
-
-        def job():
-            from graphify.fs.indexer import IndexOptions, run_index
-
-            log: list[str] = []
-            st.refresh_status.update(running=True, log=log, started=time.time())
-            try:
-                run_index(st.index.root, IndexOptions(index=st.index.index_dir, metadata_only=True),
-                          log=lambda m: log.append(m))
-                st.index.maybe_reload()
-                st.refresh_status["last"] = time.time()
-            except Exception as exc:
-                log.append(f"refresh failed: {exc}")
-            finally:
-                st.refresh_status["running"] = False
-
-        threading.Thread(target=job, daemon=True).start()
-        return _json({"running": True})
+        try:
+            body = await request.json()
+        except ValueError:
+            body = {}
+        st.updater.ensure_running()
+        st.updater.request(content=bool((body or {}).get("content")))
+        return _json(st.updater.status())
 
     async def api_refresh_status(request: Request):
-        s = dict(st.refresh_status)
-        s["log"] = s.get("log", [])[-8:]
-        return _json(s)
+        return _json(st.updater.status())
 
     # -- chat ---------------------------------------------------------------
     async def api_chat(request: Request):
@@ -455,26 +447,55 @@ def _open_path(path: Path, action: str) -> None:
 
 
 def serve(index: FsIndex, *, host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True,
-          finder_write: bool = True, chat_model: str | None = None) -> None:
+          finder_write: bool = True, chat_model: str | None = None, watch: bool = True,
+          content_updates: bool = True) -> int:
+    """Run the explorer until stopped. One server per index: if one already runs,
+    open (or print) its address and return."""
     import uvicorn
+
+    from graphify.fs import launcher
+    from graphify.fs.lock import IndexBusy, IndexLock
 
     if host not in ("127.0.0.1", "localhost", "::1"):
         raise ValueError("the explorer only binds to localhost")
-    port = _free_port(port)
-    token = secrets.token_urlsafe(24)
-    app = create_app(index, token=token, port=port, finder_write=finder_write, chat_model=chat_model)
-    url = f"http://127.0.0.1:{port}/?t={token}"
-    print(f"[graphify fs] explorer for {index.root}", flush=True)
-    print(f"[graphify fs] open: {url}", flush=True)
-    if open_browser:
-        threading.Timer(1.0, lambda: _open_url(url)).start()
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
-
-
-def _open_url(url: str) -> None:
-    import webbrowser
-
-    webbrowser.open(url)
+    lock = IndexLock(index.paths.fs_dir / "explorer.lock")
+    try:
+        lock.acquire(wait=False)
+    except IndexBusy:
+        info = launcher.read_runtime(index.index_dir) or {}
+        url = info.get("url")
+        if not url or not launcher.server_alive(info):
+            print("[graphify fs] an explorer for this folder is starting; try again in a moment", flush=True)
+            return 0
+        print(f"[graphify fs] already running: {url}", flush=True)
+        if open_browser:
+            launcher.open_url(url)
+        return 0
+    try:
+        port = _free_port(port)
+        token = secrets.token_urlsafe(24)
+        updater = Updater(index.root, index.index_dir, watch=watch, content=content_updates,
+                          on_update=index.maybe_reload, log=lambda m: print(m, flush=True))
+        app = create_app(index, token=token, port=port, finder_write=finder_write, chat_model=chat_model,
+                         updater=updater)
+        url = f"http://127.0.0.1:{port}/?t={token}"
+        launcher.write_runtime(index.index_dir, {
+            "pid": os.getpid(), "port": port, "token": token, "url": url, "root": str(index.root),
+            "index": str(index.index_dir), "started": time.time(), "watching": watch,
+        })
+        print(f"[graphify fs] explorer for {index.root}", flush=True)
+        print(f"[graphify fs] open: {url}", flush=True)
+        updater.start()
+        if open_browser:
+            threading.Timer(1.0, lambda: launcher.open_url(url)).start()
+        try:
+            uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+        finally:
+            updater.stop()
+            launcher.clear_runtime(index.index_dir, os.getpid())
+    finally:
+        lock.release()
+    return 0
 
 
 def _free_port(preferred: int) -> int:

@@ -256,6 +256,17 @@ def _skip_entry(name: str) -> bool:
     return name in SKIP_FILE_NAMES or name.startswith(".") or name.startswith("~$")
 
 
+# Top-level folders of the home directory that hold app data, not documents.
+HOME_SKIP_DIRS = {"Library"}
+
+
+def skip_dir(root: Path, parent: Path, name: str) -> bool:
+    """True when ``scan`` does not descend into ``parent/name`` (``root`` resolved)."""
+    if name in SKIP_DIR_NAMES or _skip_entry(name):
+        return True
+    return parent == root and name in HOME_SKIP_DIRS and root == Path.home().resolve()
+
+
 def scan(root: Path, *, cache_path: Path | None = None, read_properties: bool = True,
          progress=None) -> ScanResult:
     """Walk ``root`` and return every folder and file with its metadata.
@@ -283,7 +294,7 @@ def scan(root: Path, *, cache_path: Path | None = None, read_properties: bool = 
         keep_dirs = []
         package_dirs = []
         for d in sorted(dirnames):
-            if d in SKIP_DIR_NAMES or _skip_entry(d):
+            if skip_dir(root, dp, d):
                 continue
             if os.path.islink(dp / d):
                 continue

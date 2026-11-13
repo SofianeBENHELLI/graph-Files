@@ -10,7 +10,8 @@ your folder ──► scan (folders, files, Finder tags, document keywords)     
             ──► media (local Whisper transcripts of audio/video)             cached
             ──► topics (local model suggests topic tags, names the topics)   cached
             ──► ~/.graphify-fs/<folder>/graphify-out/fs/graph.json
-                     ├─► graphify fs explore   (web app + local chat)
+                     ├─► graphify fs open      (web app + local chat; watches the folder)
+                     ├─► Graph Files.app       (launcher; optional start at login)
                      └─► graphify fs mcp       (Claude Code / Claude Desktop)
 ```
 
@@ -29,14 +30,18 @@ your folder ──► scan (folders, files, Finder tags, document keywords)     
   - accepting or rejecting suggested tags
   - a chat panel where the local model answers questions about your files and links to them
 - **Finder write-back.** Tags you accept or add in the explorer are also written as real Finder tags. Every write is logged and can be undone.
+- **Always up to date.** While the explorer runs it watches the folder. New, edited, moved and deleted files appear within seconds, and the local model reads new contents in the background.
+- **A real app.** `graphify fs app install` adds a **Graph Files** app to Spotlight, Launchpad and the Dock, and can start the explorer at login.
 
 ## 1. Install
 
 From this repository (Python 3.11+, [uv](https://docs.astral.sh/uv/)):
 
 ```bash
-uv tool install --python 3.12 --editable ".[fs,video]"
+uv tool install --python 3.12 ".[fs,video]"
 ```
+
+Run it again after you pull changes. For development, `--editable` runs the code straight from the repository instead; if the repository is in iCloud Drive or Documents, the launcher app then needs macOS permission to read it (see [Launcher app](#6-launcher-app-and-start-at-login)).
 
 ## 2. Install the local models (one time)
 
@@ -84,10 +89,10 @@ Useful flags: `--no-media` (skip audio/video), `--no-topics`, `--no-vision`, `--
 ## 4. Explore
 
 ```bash
-graphify fs explore ~/Documents/Work
+graphify fs open ~/Documents/Work
 ```
 
-A browser tab opens on `http://127.0.0.1:8765/?t=<token>`.
+This starts the explorer in the background (if it is not running yet) and opens a browser tab on `http://127.0.0.1:8765/?t=<token>`. The explorer keeps running after you close the tab; `graphify fs stop` ends it. `graphify fs explore` does the same in the foreground of your terminal (Ctrl-C stops it).
 
 - **⌘K** to search. Results come from file names, titles, tags, keywords and the concepts extracted from contents.
 - The **sidebar** has Recent files, Folders, Tags (with Finder colours), Topics, Kinds and Years.
@@ -109,7 +114,41 @@ To browse without ever writing Finder tags:
 graphify fs explore --no-finder-write
 ```
 
-## 5. Use it from Claude (MCP)
+## 5. Keep it up to date
+
+While the explorer runs, it watches the indexed folder (FSEvents on macOS):
+
+- **Within seconds** of a change (a few seconds after the changes stop), names, folders, Finder tags, keywords and the full-text index are refreshed. New files are searchable by the words inside them right away, and deleted or moved files disappear. Open views refresh by themselves.
+- **Contents** of new and edited files are read by the local model (concepts, transcripts, topic tags) once the folder has been calm for 5 minutes, in the background, and only while Ollama runs with the models. Results are cached per file, so this only reads what changed.
+
+The header shows where things stand:
+
+| Pill | Meaning |
+|---|---|
+| ✓ Up to date | watching; nothing waiting |
+| ↻ Changes detected… / Updating… | a quick refresh is coming or running |
+| 📖 N to read | N new or edited files have not been read by the local model yet. Click it to read them now. Hover it to see why it is waiting (for example "local model not running"). |
+| 📖 Reading files… | the local model is reading them |
+
+Options for `open`, `explore` and `serve`: `--no-watch` (never follow changes) and `--no-content-updates` (follow changes, but never start the local model in the background). Without the explorer, `graphify fs index ~/Documents/Work --watch` indexes, then keeps watching in the terminal.
+
+Only one index run happens at a time per folder. A long content pass started from the terminal does not block the quick refreshes, and the next one waits for it to finish.
+
+## 6. Launcher app and start at login
+
+On macOS, give it a proper app:
+
+```bash
+graphify fs app install ~/Documents/Work --login
+```
+
+- **Graph Files** appears in `~/Applications`, Spotlight and Launchpad. Drag it to the Dock to keep it there. Opening it does what `graphify fs open` does.
+- `--login` adds a login item, so the explorer starts in the background when you log in and keeps the index up to date even with no window open. It also restarts the explorer within 15 minutes if it ever stops.
+- **Privacy.** macOS protects iCloud Drive, Documents, Desktop, Downloads and external drives per app. The first time Graph Files opens one of them, macOS asks to let **Graph Files** access it: click **Allow**. The login item starts the explorer through the app, so this one permission covers both. The install command tells you which places need it.
+- Several folders: install once per folder. The second app is named "Graph Files - <folder>".
+- `graphify fs status` shows whether the explorer is running and starts at login. `graphify fs app uninstall ~/Documents/Work` removes the app and the login item.
+
+## 7. Use it from Claude (MCP)
 
 The same tools the local chat uses are available over MCP:
 
@@ -142,7 +181,7 @@ claude mcp add graphify-fs -- graphify fs mcp ~/Documents/Work
 
 The server reloads the graph automatically after a re-index.
 
-## 6. Ask from the terminal
+## 8. Ask from the terminal
 
 ```bash
 graphify fs ask "what is this folder about?"
@@ -193,5 +232,7 @@ graphify fs ask "find the latest budget spreadsheet" ~/Documents/Work --json
 
 - **The explorer says "local model off".** Open Ollama, then run `graphify fs setup`.
 - **The content pass is slow.** Use smaller models, `--no-vision`, or index a sub-folder first. Results are cached per file, so an interrupted run loses nothing.
-- **A file shows "iCloud".** It isn't downloaded. Open it in Finder, then run **↻ Refresh**.
+- **A file shows "iCloud".** It isn't downloaded. Open it in Finder; the explorer picks it up by itself (or click **↻ Refresh**).
+- **Graph Files does nothing when opened.** macOS is waiting for a privacy permission; after 20 seconds the app shows a notification saying so. Look for a dialog, or allow **Graph Files** in System Settings > Privacy & Security > Files and Folders. `graphify fs open` from Terminal always works (it uses Terminal's permission). If graphify was installed with `--editable` from a folder in iCloud Drive or Documents, reinstall it without `--editable`.
+- **"📖 N to read" never goes away.** Hover it: the local model is not running or not downloaded. Open Ollama and run `graphify fs setup`.
 - **Wrong tag suggestions.** Click ✕ once; rejected tags are never suggested again for that file.

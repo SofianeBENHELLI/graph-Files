@@ -89,7 +89,7 @@ function FileTable({ files, selected, onSelect, onOpen }) {
 
 function FolderTree({ path, depth, current, onPick, cache, load }) {
   const node = cache[path];
-  useEffect(() => { if (!node) load(path); }, [path]);
+  useEffect(() => { if (!node) load(path); }, [path, !node]); // reload after the index changes
   const [open, setOpen] = useState({});
   if (!node) return null;
   return html`<div>${node.folders.map((sub) => html`<div>
@@ -160,8 +160,34 @@ function GraphView({ data, onNode, onNodeDbl, focusId }) {
     <div class="graph-hint">click: open · double-click: explore around it</div></div>`;
 }
 
+// ---------------------------------------------------------------- index status
+const ago = (ts) => {
+  if (!ts) return "never";
+  const s = Math.max(0, Date.now() / 1000 - ts);
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+  return `${Math.round(s / 86400)} d ago`;
+};
+
+function UpdatePill({ s, onRead }) {
+  if (!s) return null;
+  if (s.state === "reading") return html`<span class="pill busy" title=${s.note || "The local model is reading new and edited files"}>📖 Reading files…</span>`;
+  if (s.state === "updating") return html`<span class="pill busy" title="Updating names, folders, tags and text">↻ Updating…</span>`;
+  if (s.pending) return html`<span class="pill busy" title="Waiting for the changes to settle">↻ Changes detected…</span>`;
+  if (s.state === "waiting") return html`<span class="pill busy">↻ Starting…</span>`;
+  if (s.unread) {
+    const when = s.content_in != null ? ` It starts in about ${Math.max(1, Math.round(s.content_in / 60))} min.` : "";
+    const why = s.note ? ` ${s.note}.` : s.content_updates ? ` The local model reads them once the folder is calm.${when}` : "";
+    return html`<span class="pill warn clickable" onClick=${onRead}
+      title=${`${s.unread} new or edited file(s) are searchable by name and text, but the local model has not read them yet.${why} Click to read them now.`}>📖 ${s.unread} to read</span>`;
+  }
+  if (s.watching) return html`<span class="pill ok" title=${`Watching the folder for changes · updated ${ago(s.last)}`}>✓ Up to date</span>`;
+  return null;
+}
+
 // ---------------------------------------------------------------- inspector
-function Inspector({ fileId, onSelect, onFocus, onView, onClose, toast, onTagsChanged, config }) {
+function Inspector({ fileId, onSelect, onFocus, onView, onClose, toast, onTagsChanged, config, version, onGone }) {
   const [info, setInfo] = useState(null);
   const [preview, setPreview] = useState(false);
   const [text, setText] = useState(null);
@@ -169,9 +195,13 @@ function Inspector({ fileId, onSelect, onFocus, onView, onClose, toast, onTagsCh
   const [err, setErr] = useState(null);
   const load = useCallback(() => {
     setErr(null);
-    api(`/api/file?${qs({ id: fileId })}`).then(setInfo).catch((e) => setErr(e.message));
+    api(`/api/file?${qs({ id: fileId })}`).then(setInfo).catch((e) => {
+      if (onGone && /^no file matches/.test(e.message)) onGone(); // moved or deleted since
+      else setErr(e.message);
+    });
   }, [fileId]);
   useEffect(() => { setInfo(null); setPreview(false); setText(null); load(); }, [fileId]);
+  useEffect(() => { if (version) load(); }, [version]); // the index changed: refresh tags, topic, related
   useEffect(() => {
     if (preview && info && ["text", "code", "web"].includes(info.kind)) {
       fetch(`/api/raw?${qs({ id: info.id })}`, { credentials: "same-origin" }).then((r) => r.text()).then(setText).catch(() => setText("(cannot preview)"));
@@ -367,7 +397,9 @@ function App() {
   const [query, setQuery] = useState("");
   const [folders, setFolders] = useState({});
   const [toastMsg, setToastMsg] = useState(null);
-  const [refreshing, setRefreshing] = useState(false);
+  const [upd, setUpd] = useState(null);         // folder watcher / refresh status
+  const [version, setVersion] = useState(null); // graph version the views show
+  const manualRef = useRef(false);
   const searchRef = useRef(null);
 
   const toast = (m) => { setToastMsg(m); clearTimeout(toast.t); toast.t = setTimeout(() => setToastMsg(null), 3500); };
@@ -378,6 +410,26 @@ function App() {
     const onKey = (e) => { if ((e.metaKey || e.ctrlKey) && e.key === "k") { e.preventDefault(); searchRef.current && searchRef.current.focus(); } };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
+  }, []);
+  // Follow the index: the server watches the folder and rebuilds it as files change.
+  useEffect(() => {
+    let alive = true, timer = null, seen = null;
+    const tick = async () => {
+      try {
+        const s = await api("/api/refresh");
+        if (!alive) return;
+        setUpd(s);
+        if (s.graph_version && seen && s.graph_version !== seen && !s.running) {
+          loadFacets(); setFolders({}); setView((v) => ({ ...v })); setVersion(s.graph_version);
+          toast(manualRef.current ? "Index refreshed" : `Index updated${s.last_changes ? ` · ${s.last_changes} change(s)` : ""}`);
+          manualRef.current = false;
+        }
+        if (s.graph_version && (!seen || !s.running)) seen = s.graph_version;
+        timer = setTimeout(tick, s.running || s.state === "waiting" ? 1000 : 4000);
+      } catch (_) { if (alive) timer = setTimeout(tick, 8000); }
+    };
+    tick();
+    return () => { alive = false; clearTimeout(timer); };
   }, []);
   useEffect(() => localStorage.setItem("gfs-layout", layout), [layout]);
   useEffect(() => localStorage.setItem("gfs-chat", chatOpen ? "1" : "0"), [chatOpen]);
@@ -429,18 +481,11 @@ function App() {
     else if (n.group === "topic" && tab === "map") { setFocus(id); setTab("graph"); }
     else setFocus(id);
   };
-  const refresh = async () => {
-    setRefreshing(true);
-    try {
-      await post("/api/refresh", {});
-      for (let i = 0; i < 600; i++) {
-        await new Promise((r) => setTimeout(r, 1000));
-        const s = await api("/api/refresh");
-        if (!s.running) break;
-      }
-      await loadFacets(); setFolders({}); setView({ ...view }); toast("Index refreshed");
-    } catch (e) { toast(e.message); } finally { setRefreshing(false); }
+  const refresh = async (content = false) => {
+    manualRef.current = true;
+    try { setUpd(await post("/api/refresh", { content })); } catch (e) { toast(e.message); }
   };
+  const refreshing = !!(upd && (upd.running || upd.state === "waiting"));
 
   const files = (result && result.files) || [];
   const total = result ? (result.total != null ? result.total : files.length) : 0;
@@ -453,7 +498,8 @@ function App() {
       <form class="searchbox" onSubmit=${doSearch}>🔎<input ref=${searchRef} placeholder="Search names, tags and what's inside your files…" value=${query} onInput=${(e) => setQuery(e.target.value)} /><kbd>⌘K</kbd></form>
       <div class="spacer"></div>
       ${config ? html`<span class=${"pill " + (config.chat_ready ? "ok" : "warn")} title=${config.ollama ? "Ollama is running" : "Ollama not running"}>${config.chat_ready ? "● local model ready" : "○ local model off"}</span>` : null}
-      <button class="btn" onClick=${refresh} disabled=${refreshing} title="Rescan folders, files and tags (fast)">${refreshing ? "Refreshing…" : "↻ Refresh"}</button>
+      <${UpdatePill} s=${upd} onRead=${() => refresh(true)} />
+      <button class="btn" onClick=${() => refresh(false)} disabled=${refreshing} title="Rescan folders, files and tags (fast)">${refreshing ? "Refreshing…" : "↻ Refresh"}</button>
       <button class=${"btn" + (chatOpen ? " primary" : "")} onClick=${() => setChatOpen(!chatOpen)}>💬 Ask</button>
     </header>
 
@@ -509,7 +555,8 @@ function App() {
     </main>
 
     ${selected ? html`<${Inspector} fileId=${selected} config=${config} toast=${toast} onSelect=${selectFile} onFocus=${focusNode}
-        onView=${go} onClose=${() => setSelected(null)} onTagsChanged=${loadFacets} />` : html`<div class="insp"></div>`}
+        onView=${go} onClose=${() => setSelected(null)} onTagsChanged=${loadFacets} version=${version}
+        onGone=${() => { setSelected(null); toast("That file is no longer in the folder (moved or deleted)"); }} />` : html`<div class="insp"></div>`}
     ${chatOpen ? html`<${Chat} config=${config} onSelect=${(id) => setSelected(id)} onClose=${() => setChatOpen(false)}
         onHighlight=${(ids) => { if (ids.length) setView({ type: "highlight", value: ids, label: "Files the assistant found" }); }} />` : null}
     ${toastMsg ? html`<div class="toast">${toastMsg}</div>` : null}

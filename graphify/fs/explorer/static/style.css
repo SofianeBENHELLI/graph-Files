@@ -60,6 +60,9 @@ a { color: var(--accent); text-decoration: none; }
 .pill { font-size: 12px; padding: 3px 8px; border-radius: 999px; background: var(--panel-2); color: var(--muted); }
 .pill.ok { color: var(--ok); }
 .pill.warn { color: var(--warn); }
+.pill.busy { color: var(--accent, #2f5bea); }
+.pill.clickable { cursor: pointer; }
+.pill.clickable:hover { filter: brightness(1.15); text-decoration: underline; }
 
 /* sidebar */
 .side { overflow-y: auto; background: var(--panel); border-right: 1px solid var(--line); padding: 10px 8px 30px; }

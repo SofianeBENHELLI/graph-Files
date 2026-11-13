@@ -977,6 +977,7 @@ def _run_cli() -> None:
         print("    --label NAME            project label in header")
         print("  fs index <folder>       knowledge graph of a folder of files (folders, Finder tags, topics; local LLM)")
         print("  fs explore [folder]     explorer web app with a local LLM that navigates the graph")
+        print("  fs app install [folder] macOS launcher app; --login keeps the index updated in the background")
         print("  fs mcp [folder]         MCP server over the fs graph   (graphify fs --help for all fs commands)")
         print("  extract <path>          headless full extraction (AST + semantic LLM) for CI/scripts")
         print("    --backend B             gemini|kimi|claude|openai|deepseek|ollama (default: whichever API key is set)")

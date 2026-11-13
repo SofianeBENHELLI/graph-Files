@@ -107,6 +107,22 @@ class FsIndexPaths:
         return self.fs_dir / "thumbs"
 
     @property
+    def lock(self) -> Path:  # held while an index run rebuilds the files above
+        return self.fs_dir / "index.lock"
+
+    @property
+    def content_lock(self) -> Path:  # held during the slow model phase
+        return self.fs_dir / "content.lock"
+
+    @property
+    def runtime(self) -> Path:  # the running explorer server (port, token, pid)
+        return self.fs_dir / "explorer.json"
+
+    @property
+    def server_log(self) -> Path:
+        return self.fs_dir / "explorer.log"
+
+    @property
     def state(self) -> Path:
         return self.index / STATE_FILE
 
