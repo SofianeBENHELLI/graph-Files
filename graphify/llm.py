@@ -627,14 +627,21 @@ def _file_to_text(path: Path) -> str:
 
 
 def _resolve_under_root(path: Path, root: Path) -> Path | None:
-    """Return the resolved path only when it stays inside ``root``."""
+    """Return the resolved path only when it stays inside ``root``.
+
+    Also accepted: graphify's own Office sidecars when ``extract --out`` puts
+    them outside the corpus root (registered by ``detect()``).
+    """
     try:
         resolved_root = root.resolve()
         resolved_path = path.resolve()
-        resolved_path.relative_to(resolved_root)
-    except (OSError, RuntimeError, ValueError):
+    except (OSError, RuntimeError):
         return None
-    return resolved_path
+    if resolved_path.is_relative_to(resolved_root):
+        return resolved_path
+    from graphify.paths import in_sidecar_root
+
+    return resolved_path if in_sidecar_root(resolved_path) else None
 
 
 # Known prompt-injection / chat-template sentinels that a hostile source file
@@ -869,13 +876,18 @@ def _bind_node_evidence(result: dict, text_units: "list[Path | FileSlice]", root
 # every image was fed through `path.read_text(errors="replace")`, turning binary
 # pixels into garbage text — noise for API backends and an outright `exit 1` for
 # the claude-cli backend.
-_VISION_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+_VISION_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".heif"}
+# HEIC/HEIF (iPhone photos) are not accepted by vision APIs; they are converted
+# to JPEG with macOS `sips` before sending (see `_heic_to_jpeg`).
+_HEIC_EXTENSIONS = {".heic", ".heif"}
 _IMAGE_MEDIA_TYPES = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".gif": "image/gif",
     ".webp": "image/webp",
+    ".heic": "image/jpeg",
+    ".heif": "image/jpeg",
 }
 # Per-image byte ceiling. Anthropic caps a request at 32 MB and Bedrock images
 # at ~5 MB; 5 MB per image keeps every backend within limits. Oversized images
@@ -939,6 +951,30 @@ def _partition_semantic_files(
     return text_units, image_files
 
 
+def _heic_to_jpeg(path: Path) -> bytes | None:
+    """Convert a HEIC/HEIF image to JPEG bytes with macOS ``sips``.
+
+    Returns None when ``sips`` is unavailable (non-macOS) or conversion fails;
+    the image then becomes a reference node without pixels.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+    sips = shutil.which("sips")
+    if not sips:
+        return None
+    with tempfile.TemporaryDirectory(prefix="graphify-heic-") as tmp:
+        out = Path(tmp) / "image.jpg"
+        try:
+            subprocess.run(
+                [sips, "-s", "format", "jpeg", "-Z", "2048", str(path), "--out", str(out)],
+                check=True, capture_output=True, timeout=60,
+            )
+            return out.read_bytes()
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+
 def _build_image_refs(image_files: list[Path], root: Path, *, read_bytes: bool = True) -> list[_ImageRef]:
     """Build `_ImageRef`s for raster images.
 
@@ -967,7 +1003,12 @@ def _build_image_refs(image_files: list[Path], root: Path, *, read_bytes: bool =
         raw: bytes | None = None
         if read_bytes:
             try:
-                raw = abs_path.read_bytes()
+                if p.suffix.lower() in _HEIC_EXTENSIONS:
+                    raw = _heic_to_jpeg(abs_path)
+                    if raw is None:
+                        print(f"[graphify] could not convert HEIC image {rel} (needs macOS sips)", file=sys.stderr)
+                else:
+                    raw = abs_path.read_bytes()
             except OSError as exc:
                 print(f"[graphify] could not read image {rel}: {exc}", file=sys.stderr)
                 raw = None
